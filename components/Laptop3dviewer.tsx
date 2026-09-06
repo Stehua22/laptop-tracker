@@ -827,6 +827,23 @@ type OSUIState = {
 };
 
 const WIN_APPS = ["Edge", "Word", "Photos", "Mail", "Store", "Settings"];
+
+// Newly installed Store apps now actually appear in the Start menu grid (and Dock, on Mac)
+// so they're findable/openable later, not just re-launchable from inside the Store itself --
+// that was the real gap behind "can't open the apps you installed". Colors match the Store's
+// own card colors for the apps we know about.
+const STORE_APP_COLORS: Record<string, string> = { Spotify: "#1db954", Netflix: "#e50914", Discord: "#5865f2", Slack: "#4a154b" };
+
+function winStartAppList(installedApps: string[]): string[] {
+  return [...WIN_APPS, ...installedApps.filter((a) => !WIN_APPS.includes(a))];
+}
+// Shared by draw and hit-test so the panel size and grid math can never drift apart --
+// same coupling issue this file has hit before whenever they were computed separately.
+function winStartPanelLayout(appCount: number) {
+  const cols = 3;
+  const rows = Math.max(2, Math.ceil(appCount / cols));
+  return { panelW: 380, panelH: 118 + rows * 100, cols };
+}
 const MAC_DOCK = ["Finder", "Safari", "Photos", "Mail", "Music", "Settings"];
 const MAC_MENU_ITEMS = ["About This Mac", "System Settings\u2026", "Sleep", "Restart\u2026", "Shut Down\u2026"];
 const SETTINGS_TOGGLE_ORDER = ["Wi-Fi", "Bluetooth", "Dark mode", "Airplane mode"];
@@ -1073,6 +1090,14 @@ function drawWindowsUI(ctx: CanvasRenderingContext2D, wallpaper: HTMLImageElemen
   ctx.fill();
   drawWinLogo(ctx, startX + startW / 2, tbY + WIN_TASKBAR_H / 2, 8);
 
+  // Windows 11's small glowing indicator pill under an active taskbar icon -- shows Start
+  // is "active" whenever the menu is open or any app window is up.
+  if (state.startOpen || state.openApp) {
+    ctx.fillStyle = "#4d9dff";
+    roundRectPath(ctx, startX + startW / 2 - 8, OS_CANVAS_H - 4, 16, 3, 1.5);
+    ctx.fill();
+  }
+
   // Real Windows 11 taskbar has a search pill right next to Start, not just a magnifier icon.
   const searchX = startX + startW + 10, searchW = 130;
   ctx.fillStyle = "rgba(255,255,255,0.08)";
@@ -1101,7 +1126,8 @@ function drawWindowsUI(ctx: CanvasRenderingContext2D, wallpaper: HTMLImageElemen
   ctx.fillText(now.toLocaleDateString(), OS_CANVAS_W - 16, tbY + 38);
 
   if (state.startOpen) {
-    const panelW = 380, panelH = 380;
+    const appList = winStartAppList(state.installedApps);
+    const { panelW, panelH, cols } = winStartPanelLayout(appList.length);
     const panelX = centerX - panelW / 2, panelY = tbY - panelH - 8;
     // Ease-in: fades in and rises slightly from the taskbar instead of appearing instantly.
     ctx.save();
@@ -1123,15 +1149,28 @@ function drawWindowsUI(ctx: CanvasRenderingContext2D, wallpaper: HTMLImageElemen
     drawIcon(ctx, "search", panelX + 42, panelY + 35, 15);
     ctx.fillText("Type here to search", panelX + 56, panelY + 35);
 
-    const cols = 3, cellW = (panelW - 40) / cols;
+    const cellW = (panelW - 40) / cols;
     const winAppIcons: IconName[] = ["edge", "word", "photos", "mail", "store", "settings"];
-    WIN_APPS.forEach((app, i) => {
+    appList.forEach((app, i) => {
       const cx = panelX + 20 + cellW * (i % cols) + cellW / 2;
       const cy = panelY + 100 + Math.floor(i / cols) * 100;
       ctx.fillStyle = "rgba(255,255,255,0.07)";
       roundRectPath(ctx, cx - 26, cy - 26, 52, 52, 10);
       ctx.fill();
-      drawIcon(ctx, winAppIcons[i] ?? "settings", cx, cy - 2, 30);
+      if (i < WIN_APPS.length) {
+        drawIcon(ctx, winAppIcons[i] ?? "settings", cx, cy - 2, 30);
+      } else {
+        // Installed Store app without a dedicated vector icon -- colored tile + first letter,
+        // matching the color it shows as a card in the Store itself.
+        ctx.fillStyle = STORE_APP_COLORS[app] ?? "#666";
+        roundRectPath(ctx, cx - 15, cy - 17, 30, 30, 7);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = "700 14px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(app[0], cx, cy - 2);
+      }
       ctx.fillStyle = "#fff";
       ctx.font = "10px 'Segoe UI', sans-serif";
       ctx.textAlign = "center";
@@ -1150,7 +1189,7 @@ function drawWindowsUI(ctx: CanvasRenderingContext2D, wallpaper: HTMLImageElemen
 
 function hitTestWindowsUI(px: number, py: number, state: OSUIState): OSAction | null {
   if (state.openApp) {
-    return hitTestAppWindow(px, py, "windows", state.openApp);
+    return hitTestAppWindow(px, py, "windows", state.openApp, state.installedApps);
   }
   const tbY = OS_CANVAS_H - WIN_TASKBAR_H;
   const centerX = OS_CANVAS_W / 2;
@@ -1255,6 +1294,14 @@ function drawMacUI(ctx: CanvasRenderingContext2D, wallpaper: HTMLImageElement | 
     roundRectPath(ctx, cx - 22, cy - 22, 44, 44, 11);
     ctx.fill();
     drawIcon(ctx, macDockIcons[i] ?? "gear", cx, cy, 26);
+    // Small dot under the Dock icon of the currently open app -- real macOS shows exactly
+    // this to indicate a running application.
+    if (state.openApp === app) {
+      ctx.fillStyle = "#333";
+      ctx.beginPath();
+      ctx.arc(cx, dockY + dockH - 4, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
   });
 
   if (state.openApp) drawAppWindow(ctx, "mac", state.openApp, state.animT, state.wordDocText, state.settingsToggles, state.browserUrl, state.installedApps, state.installingApp);
@@ -1266,7 +1313,7 @@ function drawMacUI(ctx: CanvasRenderingContext2D, wallpaper: HTMLImageElement | 
 
 function hitTestMacUI(px: number, py: number, state: OSUIState): OSAction | null {
   if (state.openApp) {
-    return hitTestAppWindow(px, py, "mac", state.openApp);
+    return hitTestAppWindow(px, py, "mac", state.openApp, state.installedApps);
   }
   if (py <= MAC_MENUBAR_H) {
     if (px <= 40) return { type: "toggleAppleMenu" };
@@ -1679,6 +1726,68 @@ function drawAppBody(ctx: CanvasRenderingContext2D, appName: string, x: number, 
     return;
   }
 
+  if (appName === "Spotify") {
+    ctx.fillStyle = "#191414";
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#1db954";
+    ctx.beginPath();
+    ctx.arc(x + w / 2, y + h * 0.35, 44, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.font = "600 16px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Your Library", x + w / 2, y + h * 0.35 + 80);
+    ctx.fillStyle = "#b3b3b3";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("Sign in to see your playlists", x + w / 2, y + h * 0.35 + 104);
+    return;
+  }
+
+  if (appName === "Netflix") {
+    ctx.fillStyle = "#141414";
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#e50914";
+    ctx.font = "900 30px Georgia, serif";
+    ctx.textAlign = "center";
+    ctx.fillText("NETFLIX", x + w / 2, y + h * 0.4);
+    ctx.fillStyle = "#aaa";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("Who's watching?", x + w / 2, y + h * 0.4 + 34);
+    return;
+  }
+
+  if (appName === "Discord") {
+    ctx.fillStyle = "#313338";
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#2b2d31";
+    ctx.fillRect(x, y, w * 0.22, h);
+    ["# general", "# random", "# laptopcore"].forEach((label, i) => {
+      ctx.fillStyle = i === 0 ? "#fff" : "#96989d";
+      ctx.font = "12.5px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(label, x + 16, y + 30 + i * 28);
+    });
+    ctx.fillStyle = "#96989d";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("No messages yet. Say hi!", x + w * 0.22 + 20, y + 34);
+    return;
+  }
+
+  if (appName === "Slack") {
+    ctx.fillStyle = "#3f0e40";
+    ctx.fillRect(x, y, w * 0.24, h);
+    ["# general", "# announcements", "# random"].forEach((label, i) => {
+      ctx.fillStyle = i === 0 ? "#fff" : "#cfc3cf";
+      ctx.font = "12.5px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(label, x + 16, y + 30 + i * 28);
+    });
+    ctx.fillStyle = "#616061";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("You're all caught up.", x + w * 0.24 + 20, y + 34);
+    return;
+  }
+
   // Fallback for any app without a dedicated body
   ctx.fillStyle = "#999";
   ctx.font = "13px 'Segoe UI', -apple-system, sans-serif";
@@ -1686,7 +1795,7 @@ function drawAppBody(ctx: CanvasRenderingContext2D, appName: string, x: number, 
   ctx.fillText(`${appName} is running`, x + w / 2, y + h / 2);
 }
 
-function hitTestAppWindow(px: number, py: number, theme: "windows" | "mac", appName: string): OSAction | null {
+function hitTestAppWindow(px: number, py: number, theme: "windows" | "mac", appName: string, installedApps: string[] = []): OSAction | null {
   const winW = OS_CANVAS_W * 0.72, winH = OS_CANVAS_H * 0.68;
   const winX = (OS_CANVAS_W - winW) / 2, winY = (OS_CANVAS_H - winH) / 2 - 20;
   const chromeH = 40;
@@ -1708,7 +1817,10 @@ function hitTestAppWindow(px: number, py: number, theme: "windows" | "mac", appN
       const cx0 = bodyX + pad + (i % cols) * (cellW + pad), cy0 = bodyY + pad + Math.floor(i / cols) * (cellH + pad);
       const btnX = cx0 + 84, btnY = cy0 + 50, btnW = 60, btnH = 24;
       if (px >= btnX && px <= btnX + btnW && py >= btnY && py <= btnY + btnH) {
-        return { type: "installApp", name: apps[i] };
+        // Once installed, this same button becomes "Open" -- it should actually open the
+        // app's window, not try to install it again (which the guard in applyOSAction would
+        // just silently ignore, leaving the button looking broken/unresponsive).
+        return installedApps.includes(apps[i]) ? { type: "launch", name: apps[i] } : { type: "installApp", name: apps[i] };
       }
     }
   }
@@ -2480,6 +2592,7 @@ export default function Laptop3DViewer({ isAdmin = false, studioMode = false }: 
   const animateOpenRef = useRef<number | null>(null);
   const animateOpen = () => {
     if (animateOpenRef.current) cancelAnimationFrame(animateOpenRef.current);
+    if (animateCloseRef.current) { cancelAnimationFrame(animateCloseRef.current); animateCloseRef.current = null; }
     osStateRef.current = { ...osStateRef.current, animT: 0 };
     const duration = 160;
     const start = performance.now();
@@ -2495,6 +2608,33 @@ export default function Laptop3DViewer({ isAdmin = false, studioMode = false }: 
       }
     };
     animateOpenRef.current = requestAnimationFrame(step);
+  };
+
+  // Windows 11's Fluent Design closes things with a quick shrink+fade instead of an instant
+  // disappearance -- this mirrors that: animT eases back down to 0 while the panel/window's
+  // boolean flag stays true (so the draw functions keep rendering it, just fading out), and
+  // onComplete only fires once the animation actually finishes, flipping the flag off then.
+  const animateCloseRef = useRef<number | null>(null);
+  const animateClose = (onComplete: () => void) => {
+    if (animateCloseRef.current) cancelAnimationFrame(animateCloseRef.current);
+    if (animateOpenRef.current) { cancelAnimationFrame(animateOpenRef.current); animateOpenRef.current = null; }
+    const startVal = osStateRef.current.animT;
+    const duration = 120;
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(t, 2); // ease-in quad -- closing reads snappier than opening
+      osStateRef.current = { ...osStateRef.current, animT: startVal * (1 - eased) };
+      redrawOS();
+      if (t < 1) {
+        animateCloseRef.current = requestAnimationFrame(step);
+      } else {
+        animateCloseRef.current = null;
+        onComplete();
+        osStateRef.current = { ...osStateRef.current, animT: 1 }; // reset so the next open starts fresh
+      }
+    };
+    animateCloseRef.current = requestAnimationFrame(step);
   };
 
   // Lazily loads (and caches) the wallpaper image for a theme, redrawing once it's ready.
@@ -2526,20 +2666,27 @@ export default function Laptop3DViewer({ isAdmin = false, studioMode = false }: 
     switch (action.type) {
       case "toggleStart": {
         const opening = !osStateRef.current.startOpen;
-        osStateRef.current = { ...osStateRef.current, startOpen: opening, appleMenuOpen: false };
-        if (opening) animateOpen(); else redrawOS();
+        if (opening) {
+          osStateRef.current = { ...osStateRef.current, startOpen: true, appleMenuOpen: false };
+          animateOpen();
+        } else {
+          animateClose(() => { osStateRef.current = { ...osStateRef.current, startOpen: false }; });
+        }
         break;
       }
       case "toggleAppleMenu": {
         const opening = !osStateRef.current.appleMenuOpen;
-        osStateRef.current = { ...osStateRef.current, appleMenuOpen: opening };
-        if (opening) animateOpen(); else redrawOS();
+        if (opening) {
+          osStateRef.current = { ...osStateRef.current, appleMenuOpen: true };
+          animateOpen();
+        } else {
+          animateClose(() => { osStateRef.current = { ...osStateRef.current, appleMenuOpen: false }; });
+        }
         break;
       }
       case "closeMenus":
         if (osStateRef.current.startOpen || osStateRef.current.appleMenuOpen) {
-          osStateRef.current = { ...osStateRef.current, startOpen: false, appleMenuOpen: false };
-          redrawOS();
+          animateClose(() => { osStateRef.current = { ...osStateRef.current, startOpen: false, appleMenuOpen: false }; });
         }
         break;
       case "launch":
@@ -2550,8 +2697,7 @@ export default function Laptop3DViewer({ isAdmin = false, studioMode = false }: 
         animateOpen();
         break;
       case "closeApp":
-        osStateRef.current = { ...osStateRef.current, openApp: null };
-        redrawOS();
+        animateClose(() => { osStateRef.current = { ...osStateRef.current, openApp: null }; });
         break;
       case "appleMenuItem":
         osStateRef.current = { ...osStateRef.current, appleMenuOpen: false };
@@ -3019,6 +3165,9 @@ export default function Laptop3DViewer({ isAdmin = false, studioMode = false }: 
         const px = hit.uv.x * OS_CANVAS_W;
         const py = (1 - hit.uv.y) * OS_CANVAS_H;
         const action = osThemeRef.current === "mac" ? hitTestMacUI(px, py, osStateRef.current) : hitTestWindowsUI(px, py, osStateRef.current);
+        if (osStateRef.current.openApp) {
+          console.log("[App window click]", { openApp: osStateRef.current.openApp, px: px.toFixed(0), py: py.toFixed(0), installedApps: osStateRef.current.installedApps, action });
+        }
         if (action) applyOSAction(action);
         return;
       }
@@ -3310,6 +3459,7 @@ export default function Laptop3DViewer({ isAdmin = false, studioMode = false }: 
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
       if (installTimeoutRef.current) clearTimeout(installTimeoutRef.current);
       if (animateOpenRef.current) cancelAnimationFrame(animateOpenRef.current);
+      if (animateCloseRef.current) cancelAnimationFrame(animateCloseRef.current);
       keyPressTimeouts.current.forEach((t) => clearTimeout(t));
       keyPressTimeouts.current.clear();
     };
